@@ -15,13 +15,19 @@ const gm = require('gm').subClass({
 }); // Enable ImageMagick integration.
 
 const BUCKET_NAME = process.env.BUCKET_NAME;
+const ALLOWED_EXTENSIONS = process.env.ALLOWED_EXTENSIONS.split('|');
 const PROCESSED_DIR_NAME = process.env.PROCESSED_DIR_NAME;
 
 const log = (msg, obj) => console.log(msg, JSON.stringify(obj, null, 2));
 
 const getImagesFromEvent = (event) => event.Records.reduce((accum, r) => {
     if (r.s3.bucket.name === BUCKET_NAME) {
-        accum.push(r.s3.object.key);
+        const key = r.s3.object.key;
+        const extension = path.extname(key).toLowerCase();
+
+        if (ALLOWED_EXTENSIONS.indexOf(extension) !== -1) {
+            accum.push(key);
+        }
     }
 
     return accum;
@@ -77,7 +83,9 @@ const uploadImage = (imagePath, imageData) => new BbPromise((resolve, reject) =>
 });
 
 const getImageSize = (image) => new BbPromise((resolve, reject) => {
-    image.size({ bufferStream: true }, (err, result) => {
+    image.size({
+        bufferStream: true
+    }, (err, result) => {
         if (err) {
             reject(err);
             return;
@@ -92,7 +100,12 @@ const createTempEmoji = (emojiType, width, height) => new BbPromise((resolve, re
     const emojiPath = path.join(__dirname, 'emoji', emojiType + '.png');
     const tempPath = path.join('/tmp', uuidV4() + '.png');
 
-    log('Creating tmp emoji image', { tempPath, width, height, emojiType });
+    log('Creating tmp emoji image', {
+        tempPath,
+        width,
+        height,
+        emojiType
+    });
 
     gm(emojiPath)
         .resize(width.toString(), height.toString())
@@ -103,13 +116,16 @@ const createTempEmoji = (emojiType, width, height) => new BbPromise((resolve, re
 });
 
 const composeImageToBuffer = (image, compositePath, xy) => new BbPromise((resolve, reject) => {
-    log('Composing image', { compositePath, xy });
+    log('Composing image', {
+        compositePath,
+        xy
+    });
 
     image
         .composite(compositePath)
         .geometry(xy)
         .toBuffer('jpg', (err, buffer) => {
-            if(err) reject(err);
+            if (err) reject(err);
             else resolve(buffer);
         });
 });
