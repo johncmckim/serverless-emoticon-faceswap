@@ -1,0 +1,8 @@
+{
+  "name": "serverless-emoticon-faceswap-functions",
+  "dependencies": {
+    "bluebird": "^3.4.7",
+    "gm": "^1.23.0",
+    "uuid": "^3.0.1"
+  }
+}

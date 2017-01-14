@@ -1,0 +1,31 @@
+language: node_js
+node_js:
+  - '4.3'
+
+env:
+  global:
+    - AWS_REGION=us-east-1
+
+before_install:
+  - travis_retry npm i -g snyk
+
+install:
+  - travis_retry ./install.sh
+
+script: npm run lint && npm test
+
+deploy:
+  - provider: script
+    skip_cleanup: true
+    script: ./deploy.sh production
+    on:
+      branch: master
+
+  - provider: script
+    skip_cleanup: true
+    script: ./deploy.sh staging
+    on:
+      branch: develop
+
+after_deploy:
+  - echo "Finished deploying serverless-emoticon-faceswap"

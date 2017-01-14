@@ -1,0 +1,50 @@
+service: serverless-emoticon-faceswap
+provider:
+  name: aws
+  runtime: nodejs4.3
+  iamRoleStatements:
+    - Effect: Allow
+      Action:
+        - rekognition:DetectFaces
+      Resource: '*'
+    - Effect: Allow
+      Action:
+        - s3:GetObject
+        - s3:PutObject
+      Resource: arn:aws:s3:::${self:custom.bucketName}/*
+
+package:
+  exclude:
+    - coverage/**
+    - node_modules/**
+    - src/package.json
+    - test/**
+    - .editorconfig
+    - .env-*
+    - .envrc
+    - .eslint*
+    - .gitignore
+    - .node-version
+    - .travis.yml
+    - deploy.sh
+    - install.sh
+    - package.json
+    - README.md
+
+custom:
+  bucketName: ${self:service}-${opt:stage}-uploads
+
+functions:
+  faceswap:
+    handler: src/faceswap.handler
+    environment:
+      BUCKET_NAME: ${self:custom.bucketName}
+      PROCESSED_DIR_NAME: processed
+    events:
+      - s3:
+          bucket: ${self:custom.bucketName}
+          event: s3:ObjectCreated:*
+          rules:
+            - prefix: uploads/
+            - suffix: .jpg
+
