@@ -37,6 +37,7 @@ custom:
 functions:
   faceswap:
     handler: src/faceswap.handler
+    timeout: 30
     environment:
       BUCKET_NAME: ${self:custom.bucketName}
       ALLOWED_EXTENSIONS: .jpg|.jpeg|.png

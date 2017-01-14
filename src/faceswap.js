@@ -18,7 +18,11 @@ const BUCKET_NAME = process.env.BUCKET_NAME;
 const ALLOWED_EXTENSIONS = process.env.ALLOWED_EXTENSIONS.split('|');
 const PROCESSED_DIR_NAME = process.env.PROCESSED_DIR_NAME;
 
-const log = (msg, obj) => console.log(msg, JSON.stringify(obj, null, 2));
+const unlinkAsync = BbPromise.promisify(fs.unlink);
+
+const log = (msg, obj) => obj ?
+    console.log(msg, JSON.stringify(obj, null, 2)) :
+    console.log(msg);
 
 const getImagesFromEvent = (event) => event.Records.reduce((accum, r) => {
     if (r.s3.bucket.name === BUCKET_NAME) {
@@ -40,7 +44,10 @@ const detectFacesOnImages = (images) => BbPromise.reduce(images, (accum, i) => {
                 Bucket: BUCKET_NAME,
                 Name: i,
             }
-        }
+        },
+        Attributes: [
+            'ALL',
+        ]
     };
 
     return new BbPromise((resolve, reject) => {
@@ -82,9 +89,9 @@ const uploadImage = (imagePath, imageData) => new BbPromise((resolve, reject) =>
     });
 });
 
-const getImageSize = (image) => new BbPromise((resolve, reject) => {
+const getImageSize = (image, bufferStream) => new BbPromise((resolve, reject) => {
     image.size({
-        bufferStream: true
+        bufferStream: bufferStream
     }, (err, result) => {
         if (err) {
             reject(err);
@@ -94,11 +101,13 @@ const getImageSize = (image) => new BbPromise((resolve, reject) => {
         log('Found size info', result);
         resolve(result);
     });
-})
+});
+
+const getTmpPath = (imageName) => path.join('/tmp', uuidV4() + path.extname(imageName));
 
 const createTempEmoji = (emojiType, width, height) => new BbPromise((resolve, reject) => {
     const emojiPath = path.join(__dirname, 'emoji', emojiType + '.png');
-    const tempPath = path.join('/tmp', uuidV4() + '.png');
+    const tempPath = getTmpPath('emoji.png');
 
     log('Creating tmp emoji image', {
         tempPath,
@@ -115,50 +124,104 @@ const createTempEmoji = (emojiType, width, height) => new BbPromise((resolve, re
         });
 });
 
-const composeImageToBuffer = (image, compositePath, xy) => new BbPromise((resolve, reject) => {
-    log('Composing image', {
-        compositePath,
-        xy
+const imageToDisk = (image, path) => new BbPromise((resolve, reject) => {
+    image.write(path, (err) => {
+        if (err) reject(err);
+        else resolve(path);
     });
-
-    image
-        .composite(compositePath)
-        .geometry(xy)
-        .toBuffer('jpg', (err, buffer) => {
-            if (err) reject(err);
-            else resolve(buffer);
-        });
 });
 
-const overlayEmoji = BbPromise.coroutine(function* (imagePath, imageData, emojiType, faceDetails) {
-    const image = gm(imageData);
+const imageToBuffer = (image) => new BbPromise((resolve, reject) => {
+    image.toBuffer('jpg', (err, buffer) => {
+        if (err) reject(err);
+        else resolve(buffer);
+    });
+});
 
-    const sizeResult = yield getImageSize(image);
-    const height = sizeResult.height;
-    const width = sizeResult.width;
-    // Get first face
-    const boundingBox = faceDetails[0].BoundingBox;
+const getEmojiType = (faceDetails) => {
+    if (!faceDetails.Emotions) return 'unknown'
 
-    const emojiWidth = parseInt(boundingBox.Width * width, 10) + 10;
-    const emojiHeight = parseInt(boundingBox.Height * height, 10) + 10;
+    const emotion = faceDetails.Emotions.reduce((mostLikely, e) => {
+        if (mostLikely.Confidence < e.Confidence) {
+            mostLikely = e;
+        }
+        return mostLikely;
+    });
+
+    switch (emotion.Type) {
+        case 'HAPPY':
+        case 'SAD':
+        case 'ANGRY':
+        case 'CONFUSED':
+        case 'DISGUSTED':
+        case 'SURPRISED':
+        case 'CALM':
+            return emotion.Type.toLowerCase();
+        case 'UNKNOWN':
+        default:
+            return 'unknown';
+    }
+}
+
+const overlayEmoji = BbPromise.coroutine(function* (image, imageHeight, imageWidth, face, tmpEmojis) {
+    const boundingBox = face.BoundingBox;
+
+    const emojiWidth = parseInt(boundingBox.Width * imageWidth, 10) + 10;
+    const emojiHeight = parseInt(boundingBox.Height * imageHeight, 10) + 10;
+    const emojiType = getEmojiType(face);
 
     const emojiPath = yield createTempEmoji(emojiType, emojiWidth, emojiHeight);
 
-    const xy = `+${boundingBox.Left * width}+${boundingBox.Top * height}`
+    tmpEmojis.push(emojiPath);
 
-    const newImageBuffer = yield composeImageToBuffer(image, emojiPath, xy);
+    const xy = `+${boundingBox.Left * imageWidth}+${boundingBox.Top * imageHeight}`
 
-    // Clean up! - this is important Lambda is not completely stateless
-    fs.unlinkSync(emojiPath);
+    log('Composing image', { emojiPath, xy });
 
-    yield uploadImage(imagePath, newImageBuffer)
+    return image.in('-page', xy, emojiPath);
+});
+
+const overlayFacesWithEmoji = BbPromise.coroutine(function* (imagePath, imageData, faceDetails) {
+    const tmpEmojis = [];
+
+    try {
+        const image = gm(imageData);
+
+        const sizeResult = yield getImageSize(image, true);
+        const tempImagePath = yield imageToDisk(image, getTmpPath(imagePath));
+
+        tmpEmojis.push(tempImagePath);
+
+        const height = sizeResult.height;
+        const width = sizeResult.width;
+
+        const composedImage = yield BbPromise.reduce(faceDetails, (i, face) =>
+            overlayEmoji(i, height, width, face, tmpEmojis),
+            gm().in('-page', '+0+0', tempImagePath) // init with image
+        );
+
+        log('Composed image');
+
+        const newImageBuffer = yield imageToBuffer(composedImage.mosaic());
+
+        yield uploadImage(imagePath, newImageBuffer);
+    } catch (e) {
+        throw e;
+    } finally {
+        log('Cleaning up tmp images ', tmpEmojis);
+
+        if (tmpEmojis.length) {
+            // Clean up! - this is important Lambda is not completely stateless
+            yield BbPromise.all(tmpEmojis, (p) => unlinkAsync(p));
+        }
+    }
 });
 
 const processImages = (imageFaces) => BbPromise.map(Object.keys(imageFaces), (imagePath) =>
     downloadImage(imagePath).then((response) => {
         const faceDetails = imageFaces[imagePath].FaceDetails;
 
-        return overlayEmoji(imagePath, response.Body, 'smile', faceDetails);
+        return overlayFacesWithEmoji(imagePath, response.Body, faceDetails);
     })
 );
 
